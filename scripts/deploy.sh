@@ -26,6 +26,8 @@ cd "$REPO_ROOT"
 
 BACKEND_TAG=""
 FRONTEND_TAG=""
+BACKEND_TAG_CLI=""
+FRONTEND_TAG_CLI=""
 ROLLBACK=0
 DRY_RUN=0
 ENVIRONMENT="prod"
@@ -36,9 +38,9 @@ die()  { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --tag)      BACKEND_TAG="$2"; FRONTEND_TAG="$2"; shift 2 ;;
-    --backend)  BACKEND_TAG="$2"; shift 2 ;;
-    --frontend) FRONTEND_TAG="$2"; shift 2 ;;
+    --tag)      BACKEND_TAG_CLI="$2"; FRONTEND_TAG_CLI="$2"; shift 2 ;;
+    --backend)  BACKEND_TAG_CLI="$2"; shift 2 ;;
+    --frontend) FRONTEND_TAG_CLI="$2"; shift 2 ;;
     --rollback) ROLLBACK=1; shift ;;
     --dry-run)  DRY_RUN=1; shift ;;
     --env)      ENVIRONMENT="$2"; shift 2 ;;
@@ -76,6 +78,11 @@ esac
 # shellcheck disable=SC1091
 set -a; source "$ENV_FILE"; set +a
 
+# CLI flags beat the pins in the env file: the file is sourced after argv is
+# parsed, so without this --tag was silently ignored whenever .env pinned a tag.
+[[ -n "$BACKEND_TAG_CLI" ]]  && BACKEND_TAG="$BACKEND_TAG_CLI"
+[[ -n "$FRONTEND_TAG_CLI" ]] && FRONTEND_TAG="$FRONTEND_TAG_CLI"
+
 if [[ $ROLLBACK -eq 1 ]]; then
   [[ -f "$STATE_FILE" ]] || die "no $STATE_FILE to roll back to"
   # shellcheck disable=SC1090
@@ -87,6 +94,10 @@ fi
 
 BACKEND_TAG="${BACKEND_TAG:-${BACKEND_TAG_PIN:-latest}}"
 FRONTEND_TAG="${FRONTEND_TAG:-${FRONTEND_TAG_PIN:-latest}}"
+
+# Must be exported: compose interpolates ${BACKEND_TAG:-latest} from the process
+# env, so an unexported shell var silently deploys :latest.
+export BACKEND_TAG FRONTEND_TAG
 
 # -p keeps the two environments in separate compose projects; -f is the base file
 # plus (for dev) the override that renames containers and the volume. The old

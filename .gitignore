@@ -4,7 +4,7 @@
 !.env.example
 
 # Written by deploy.sh so --rollback knows the previous tags.
-.deploy-state
+.deploy-state*
 
 # Database dumps: compressed copies of user data, never in git.
 backups/
