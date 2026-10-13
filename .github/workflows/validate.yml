@@ -1,0 +1,66 @@
+name: validate
+
+# Cheap checks that catch the mistakes this template exists to prevent: a compose
+# file that no longer renders, a shell script that no longer parses, a committed
+# .env, or a placeholder left in a deployed hostname.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Render the prod stack
+        run: |
+          cp .env.example /tmp/ci.env
+          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci/; s/^ML_SERVICE_API_KEY=.*/ML_SERVICE_API_KEY=ci/; s/^GEMINI_API_KEY=.*/GEMINI_API_KEY=ci/' /tmp/ci.env
+          docker compose --env-file /tmp/ci.env -f compose/docker-compose.yml config >/dev/null
+
+      - name: Render the dev overlay
+        run: |
+          cp .env.dev.example /tmp/ci-dev.env
+          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci/; s/^ML_SERVICE_API_KEY=.*/ML_SERVICE_API_KEY=ci/; s/^GEMINI_API_KEY=.*/GEMINI_API_KEY=ci/' /tmp/ci-dev.env
+          docker compose --env-file /tmp/ci-dev.env \
+            -f compose/docker-compose.yml -f compose/dev.yml -p app-dev config >/dev/null
+
+      # The dev overlay exists to keep the two environments apart. If it stops
+      # doing that, a dev deploy silently replaces the prod containers.
+      - name: Dev must not reuse prod container names
+        run: |
+          cp .env.dev.example /tmp/ci-dev.env
+          sed -i 's/^POSTGRES_PASSWORD=.*/POSTGRES_PASSWORD=ci/; s/^ML_SERVICE_API_KEY=.*/ML_SERVICE_API_KEY=ci/; s/^GEMINI_API_KEY=.*/GEMINI_API_KEY=ci/' /tmp/ci-dev.env
+          docker compose --env-file /tmp/ci-dev.env \
+            -f compose/docker-compose.yml -f compose/dev.yml -p app-dev config \
+            | grep -q 'container_name: app-dev-backend'
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A .env is never committed, and .env.example never carries a value.
+      - name: No committed secrets
+        run: |
+          if git ls-files | grep -E '(^|/)\.env$'; then
+            echo "a real .env is committed" >&2; exit 1
+          fi
+          if grep -nE '=(ghp_|github_pat_|sk-|[A-Za-z0-9/+]{40,})' .env.example .env.dev.example; then
+            echo "a value is set in an example file" >&2; exit 1
+          fi
+
+      - name: No unrendered placeholders outside the example files
+        run: |
+          if grep -rn 'CHANGEME\|<account-id>\|your-org' --exclude='.env*.example' --exclude-dir=.git .; then
+            echo "placeholder left in a deployed file" >&2; exit 1
+          fi

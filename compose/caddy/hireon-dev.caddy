@@ -1,0 +1,49 @@
+# Caddy route for the development stack.
+#
+# Same exposure rule as prod: only the frontend is routed to. The dev backend has
+# no hostname, the browser talks to this origin, and Next.js proxies /api/* to it
+# over the hireon-dev compose network. No CORS policy, no second certificate.
+#
+#   import /etc/caddy/sites/hireon-dev.caddy
+#
+# One label under evanhfw.my.id: two labels (dev.hireon.evanhfw.my.id) would fall
+# outside Cloudflare's Universal SSL wildcard.
+
+hireon-dev.evanhfw.my.id {
+	tls {
+		dns cloudflare {env.CF_DNS_API_TOKEN}
+	}
+
+	request_body {
+		max_size 8MB
+	}
+
+	reverse_proxy hireon-dev-frontend:3000 {
+		transport http {
+			read_timeout 180s
+			write_timeout 180s
+		}
+	}
+
+	log {
+		output file /data/logs/hireon-dev-access.log {
+			roll_size 10MB
+			roll_keep 3
+		}
+		format json
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	encode zstd gzip
+
+	handle_errors {
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
+}

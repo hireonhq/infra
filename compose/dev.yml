@@ -1,0 +1,32 @@
+# Development overlay.
+#
+# Always used on top of the base file, never alone:
+#   docker compose -p hireon-dev --env-file .env.dev \
+#     -f compose/docker-compose.yml -f compose/dev.yml up -d
+#
+# scripts/deploy.sh --env dev does exactly that.
+#
+# Why an overlay instead of a second compose file: the base file is the prod
+# layout and is worth having exactly one of. Everything that differs for dev is
+# host-global state -- container names and the volume name -- because the base
+# file pins them. Without this, `up` on dev would replace the prod containers.
+
+name: hireon-dev
+
+services:
+  postgres:
+    container_name: hireon-dev-postgres
+  backend:
+    container_name: hireon-dev-backend
+  frontend:
+    container_name: hireon-dev-frontend
+  # dev runs frontend + backend + postgres only. The profile is additive here, so
+  # prod (base file, no profile) still starts ml; dev only if asked explicitly.
+  ml-services:
+    container_name: hireon-dev-ml
+    profiles: ["dev-ml"]
+
+volumes:
+  # Separate volume: dev migrations must never touch prod rows.
+  postgres_data:
+    name: hireon-dev-postgres-data

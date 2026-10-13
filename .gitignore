@@ -1,0 +1,13 @@
+# Real credentials. .env.example is the documented template.
+.env
+.env.*
+!.env.example
+
+# Written by deploy.sh so --rollback knows the previous tags.
+.deploy-state
+
+# Database dumps: compressed copies of user data, never in git.
+backups/
+
+# Local overrides
+*.local.yml

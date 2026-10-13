@@ -1,0 +1,57 @@
+# Caddy route for the HireOn application.
+#
+# Only the frontend is exposed. The Go backend has no route here on purpose: the
+# browser calls this origin, and Next.js forwards /api/* to the backend over the
+# Docker network. That is why no CORS policy is needed anywhere in the stack.
+#
+# Included from the main Caddyfile, e.g.
+#   import /etc/caddy/sites/hireon.caddy
+#
+# The hostname uses one label under evanhfw.my.id because Cloudflare's Universal
+# SSL only covers *.evanhfw.my.id one level deep.
+
+hireon.evanhfw.my.id {
+	tls {
+		dns cloudflare {env.CF_DNS_API_TOKEN}
+	}
+
+	# CV uploads are capped at 5 MB by the API; allow a little headroom for
+	# multipart framing so the limit is enforced by the application, which returns
+	# a proper error envelope, rather than by the edge, which does not.
+	request_body {
+		max_size 8MB
+	}
+
+	reverse_proxy frontend:3000 {
+		# Cover-letter generation streams from the AI service and can take tens of
+		# seconds; the default read timeout would cut it off.
+		transport http {
+			read_timeout 180s
+			write_timeout 180s
+		}
+	}
+
+	# Access logs without query strings: the jobs endpoint puts search terms there.
+	log {
+		output file /data/logs/hireon-access.log {
+			roll_size 10MB
+			roll_keep 5
+		}
+		format json
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# The backend is same-origin, so no cross-origin access is required.
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	encode zstd gzip
+
+	handle_errors {
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
+}

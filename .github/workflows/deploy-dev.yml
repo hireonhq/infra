@@ -1,0 +1,100 @@
+name: deploy-dev
+
+# Deploys the dev stack on the VPS. The app repos build and publish images to
+# GHCR; this workflow only pulls and restarts, so the deploy path is the same one
+# a human would run by hand.
+#
+# Triggering:
+#   1. Manually, from the Actions tab (optionally with an image tag).
+#   2. Automatically, when an app repo finishes publishing a `dev` image. That
+#      needs a PAT with `repo` scope in the app repo, e.g.:
+#        curl -X POST https://api.github.com/repos/hireonhq/infra/dispatches \
+#          -H "Authorization: Bearer $PAT" \
+#          -d '{"event_type":"dev-image-published","client_payload":{"tag":"dev"}}'
+#
+# The VPS is reached over its public IP. That is a deliberate trade: no extra
+# agent to keep alive. What keeps it defensible:
+#   - key-only SSH as a non-root `deploy` user, not root
+#   - the key exists only in this repo's secrets, and the workflow is dispatched
+#     deliberately, never on an arbitrary fork's PR
+#   - the `dev` environment below can carry required reviewers
+#
+# Before the first run, on the VPS:
+#   head -1 ~/.docker/config.json    # docker login ghcr.io must already exist
+# so the runner never handles a registry token.
+
+on:
+  # A merge into dev is the deploy trigger; docs-only or unrelated commits should
+  # not roll the stack, hence the path filter.
+  push:
+    branches: [dev]
+    paths:
+      - compose/**
+      - scripts/**
+      - .github/workflows/deploy-dev.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to deploy (both services)
+        required: false
+        default: dev
+  repository_dispatch:
+    types: [dev-image-published]
+
+# One deploy at a time; queue rather than cancel, so a half-finished rollout is
+# always followed by a complete one.
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+    timeout-minutes: 20
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.client_payload.tag || 'dev' }}"
+          # Guard the value before it reaches a shell on the VPS: it comes from a
+          # dispatch payload, which is attacker-controlled if a PAT leaks.
+          case "$TAG" in
+            *[!A-Za-z0-9._-]*) echo "unsafe tag: $TAG" >&2; exit 1 ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          set -eu
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned host keys beat ssh-keyscan: the scan below is only a fallback
+          # for the first run, before VPS_HOST_KEYS is set.
+          if [ -n "${{ secrets.VPS_HOST_KEYS }}" ]; then
+            printf '%s\n' "${{ secrets.VPS_HOST_KEYS }}" > ~/.ssh/known_hosts
+          else
+            echo "::warning::VPS_HOST_KEYS is unset; trusting ssh-keyscan output"
+            ssh-keyscan -H "$VPS_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+
+      - name: Deploy
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          ssh -i ~/.ssh/deploy_key -p "${VPS_PORT:-22}" \
+              -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              "$VPS_USER@$VPS_HOST" \
+              "cd '$DEPLOY_DIR' && git pull --ff-only && ./scripts/deploy.sh --env dev --tag '$TAG'"

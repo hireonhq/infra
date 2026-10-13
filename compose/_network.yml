@@ -1,0 +1,14 @@
+# Shared network for the HireOn stack.
+#
+# Caddy is the only service that publishes ports. Everything else talks over this
+# network by service name, so no database, API or ML port is reachable from the
+# host or the internet. Caddy joins it as an external network because it is managed
+# in its own compose project and serves other sites too.
+#
+# Create once:
+#   docker network create caddy_default
+
+networks:
+  caddy:
+    external: true
+    name: caddy_default

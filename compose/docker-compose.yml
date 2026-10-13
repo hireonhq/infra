@@ -1,0 +1,152 @@
+# HireOn stack.
+#
+# One compose project rather than a file per service, because `depends_on` and
+# health-gated startup only work between services in the same project. Splitting
+# them meant the backend could start before the database was ready.
+#
+# Exposure: only the frontend is routed to by Caddy. The backend, database and ML
+# service have no `ports:` mapping and no public route -- the browser talks to the
+# frontend, which proxies /api/* to the backend over this network. That is why the
+# stack needs no CORS policy and no second certificate.
+#
+# Deploy with ../scripts/deploy.sh, not `docker compose up` by hand.
+
+name: hireon
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-restart: &default-restart
+  restart: unless-stopped
+  # Automatic image updates stay off: deploys are deliberate, and a surprise
+  # restart of the database or API is worse than a slightly older image.
+  labels:
+    - com.centurylinklabs.watchtower.enable=false
+
+services:
+  postgres:
+    <<: [*default-restart]
+    image: pgvector/pgvector:pg17
+    container_name: hireon-postgres
+    environment:
+      TZ: Asia/Jakarta
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      # Fixed collation so index ordering does not depend on the host locale.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    logging: *default-logging
+    networks: [internal]
+
+  backend:
+    <<: [*default-restart]
+    image: ghcr.io/hireonhq/backend:${BACKEND_TAG:-latest}
+    container_name: hireon-backend
+    environment:
+      TZ: Asia/Jakarta
+      PORT: "8080"
+      NODE_ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
+      ML_SERVICE_URL: ${ML_SERVICE_URL}
+      ML_SERVICE_API_KEY: ${ML_SERVICE_API_KEY}
+      ML_TIMEOUT_SECONDS: ${ML_TIMEOUT_SECONDS:-30}
+      S3_ENDPOINT: ${S3_ENDPOINT}
+      S3_REGION: ${S3_REGION:-auto}
+      S3_BUCKET: ${S3_BUCKET}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY}
+      S3_PUBLIC_BASE_URL: ${S3_PUBLIC_BASE_URL}
+      FRONTEND_URL: ${FRONTEND_URL}
+      # Migrations run on startup; the container exits non-zero if they fail, so a
+      # broken schema never reaches a healthy state. The SQL files are baked into
+      # the image, so the tag and the schema version cannot drift apart.
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      # Dependency-free by design: a failing probe means the process is broken, not
+      # that the database is briefly busy.
+      test: ["CMD", "/app/api", "-healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    networks: [internal]
+
+  frontend:
+    <<: [*default-restart]
+    image: ghcr.io/hireonhq/frontend:${FRONTEND_TAG:-latest}
+    container_name: hireon-frontend
+    environment:
+      TZ: Asia/Jakarta
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      NODE_ENV: production
+      # Server-side only. NEXT_PUBLIC_ would inline this into the browser bundle and
+      # expose the internal topology.
+      BACKEND_URL: http://backend:8080
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # /healthz, not /api/health: everything under /api is proxied to the backend.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get('http://127.0.0.1:3000/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    # Only this service joins the public-facing network, and Caddy routes to it.
+    networks: [internal, caddy]
+
+  ml-services:
+    <<: [*default-restart]
+    image: ${ML_IMAGE:-ghcr.io/hireonhq/ml-services:latest}
+    container_name: hireon-ml
+    environment:
+      TZ: Asia/Jakarta
+      PORT: "8080"
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      API_SECRET_KEY: ${ML_SERVICE_API_KEY}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging: *default-logging
+    networks: [internal]
+
+volumes:
+  postgres_data:
+
+networks:
+  # Private: no published ports, reachable only by service name.
+  internal:
+    driver: bridge
+  # Shared with Caddy, which is managed in its own compose project and serves
+  # other sites too.
+  caddy:
+    external: true
+    name: caddy_default
