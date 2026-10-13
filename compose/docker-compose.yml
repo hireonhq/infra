@@ -57,7 +57,7 @@ services:
       TZ: Asia/Jakarta
       PORT: "8080"
       NODE_ENV: production
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable}
       SUPABASE_URL: ${SUPABASE_URL:?SUPABASE_URL is required}
       ML_SERVICE_URL: ${ML_SERVICE_URL}
       ML_SERVICE_API_KEY: ${ML_SERVICE_API_KEY}
